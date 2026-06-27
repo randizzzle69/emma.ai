@@ -4,6 +4,7 @@ MOCK_KB contains legacy demo data and is NOT used as a fallback for real answers
 Real answers come from ingested policy documents (knowledge_documents/knowledge_chunks).
 """
 
+import re
 from dataclasses import dataclass, field
 
 
@@ -120,7 +121,6 @@ def search_kb(query: str, category: str | None = None) -> list[KBEntry]:
 
 def has_ingested_documents(db_session) -> bool:
     """Check whether any policy documents have been ingested into the DB."""
-    # Use plain sqlite3 check instead of SQLAlchemy (avoids async session issues)
     import sqlite3 as _sqlite3
     from app.services.document_ingestion import DB_PATH_DEFAULT
     try:
@@ -132,12 +132,100 @@ def has_ingested_documents(db_session) -> bool:
         return False
 
 
+def _match_word(keyword: str, text: str) -> bool:
+    """Check if keyword appears as a whole word in text (case-insensitive)."""
+    return bool(re.search(r'\b' + re.escape(keyword) + r'\b', text, re.IGNORECASE))
+
+
+_STOPWORDS = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+    "as", "into", "through", "during", "before", "after", "above",
+    "below", "between", "out", "off", "over", "under", "again",
+    "further", "then", "once", "here", "there", "when", "where",
+    "why", "how", "all", "both", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own",
+    "same", "so", "than", "too", "very", "just", "because",
+    "but", "and", "or", "if", "while", "that", "this", "these",
+    "those", "it", "its", "what", "which", "who", "whom",
+    "about", "up", "any", "am",
+    # common nouns that appear everywhere in policy docs — not useful as search terms
+    "company", "policy", "employee", "employees", "work", "workplace",
+    "schedule", "lunch",
+})
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase, strip punctuation via regex word-boundary extraction, remove stopwords."""
+    import string
+    text = text.lower()
+    translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
+    text = text.translate(translator)
+    tokens = [w for w in text.split() if len(w) > 1 and w not in _STOPWORDS]
+    return list(dict.fromkeys(tokens))  # preserve order, dedupe
+
+
+def _score_chunks(rows, keywords) -> list[dict]:
+    """Score all fetched rows against keywords using word-boundary matching.
+
+    Each keyword match: title=3, category=2, source_file=1.5, content=1.
+    Minimum threshold = 2.0 to prevent false positives from single substring matches.
+    Returns top 5 unique chunks sorted by score desc, then doc_id.
+    """
+    scored_chunks: list[tuple[float, dict]] = []
+    for row in rows:
+        doc_id = row[0]
+        title = row[1] or ""
+        cat_ = row[2] or ""
+        eff_date = row[3] or "N/A"
+        source_file = row[4] or ""
+        chunk_idx = row[5]
+        content = row[6]
+
+        score = 0.0
+        for kw in keywords:
+            if _match_word(kw, title):
+                score += 3.0
+            elif _match_word(kw, cat_):
+                score += 2.0
+            elif _match_word(kw, source_file):
+                score += 1.5
+            if _match_word(kw, content):
+                score += 1.0
+
+        if score >= 2.0:
+            scored_chunks.append((score, {
+                "document_id": doc_id,
+                "title": title,
+                "category": cat_,
+                "effective_date": eff_date,
+                "source_file": source_file,
+                "chunk_index": chunk_idx,
+                "content": content,
+            }))
+
+    scored_chunks.sort(key=lambda x: (-x[0], x[1]["document_id"]))
+
+    seen = set()
+    deduped = []
+    for sc in scored_chunks:
+        key = (sc[1]["document_id"], sc[1]["chunk_index"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(sc)
+
+    return [v[1] for v in deduped[:5]]
+
+
 def search_ingested(db_session, query: str, category: str | None = None) -> list[dict]:
     """Search ingested policy chunks for relevance to the query.
 
-    Searches ALL ingested chunks regardless of triage category.
-    Ranks results by keyword count (how many keywords appear in chunk).
-    Only uses ingested docs — MOCK_KB is NOT used here.
+    Searches ALL ingested chunks regardless of triage category (category is ignored).
+    Uses pure Python-side scoring — no complex SQL LIKE expressions.
+    Scores each chunk against: chunk text, document title, document category, source filename.
+    Returns up to 5 top-scoring chunks with score >= 2.0.
     """
     import sqlite3
     from app.services.document_ingestion import DB_PATH_DEFAULT
@@ -145,51 +233,20 @@ def search_ingested(db_session, query: str, category: str | None = None) -> list
     if not has_ingested_documents(db_session):
         return []
 
-    keywords = [w for w in query.lower().split() if len(w) > 2]
+    keywords = _tokenize(query)
     if not keywords:
         keywords = [query[:3]]
 
-    # Simple: get all chunks that match ANY keyword, with the matched content
-    like_clauses = " OR ".join(["LOWER(kc.content) LIKE ?" for kw in keywords])
-    params = ["%" + kw + "%" for kw in keywords]
-
-    query_sql = (
-        "SELECT doc.document_id, doc.title, doc.category, doc.effective_date, "
-        "kc.chunk_index, kc.content FROM knowledge_chunks kc "
-        "JOIN knowledge_documents doc ON doc.document_id = kc.document_id "
-        f"WHERE ({like_clauses}) ORDER BY kc.chunk_index"
-    )
-
     conn = sqlite3.connect(DB_PATH_DEFAULT)
-    result = conn.execute(query_sql, params).fetchall()
+    rows = conn.execute(
+        "SELECT doc.document_id, doc.title, doc.category, doc.effective_date, "
+        "doc.source_file, kc.chunk_index, kc.content "
+        "FROM knowledge_chunks kc "
+        "JOIN knowledge_documents doc ON doc.document_id = kc.document_id"
+    ).fetchall()
     conn.close()
 
-    # Score each doc by keyword match count, pick best chunk per doc
-    docs_scored: dict[str, tuple[float, dict]] = {}
-    for row in result:
-        doc_id = row[0]
-        title = row[1]
-        cat_ = row[2]
-        eff_date = row[3]
-        chunk_idx = row[4]
-        content = row[5]
-
-        # Count how many keywords match this chunk
-        score = sum(1 for kw in keywords if kw in content.lower())
-
-        if doc_id not in docs_scored or score > docs_scored[doc_id][0]:
-            docs_scored[doc_id] = (score, {
-                "document_id": doc_id,
-                "title": title,
-                "category": cat_,
-                "effective_date": eff_date,
-                "chunk_index": chunk_idx,
-                "content": content,
-            })
-
-    # Rank by score descending, then alphabetically for stability
-    ranked = sorted(docs_scored.items(), key=lambda x: (-x[1][0], x[0]))
-    return [v[1] for v in ranked[:5]]
+    return _score_chunks(rows, keywords)
 
 
 def get_ingestion_status(db_session) -> dict:
@@ -245,71 +302,30 @@ def has_ingested_docs() -> bool:
 def search_ingested_by_query(query: str, category: str | None = None) -> list[dict]:
     """Search ingested policy chunks by query. No session needed.
 
-    Searches ALL ingested chunks regardless of triage category.
-    Ranks results by keyword relevance (more matches = higher rank).
-    Returns up to 5 docs with best-match chunk.
+    Searches ALL ingested chunks regardless of triage category (category is ignored).
+    Uses pure Python-side scoring — no complex SQL LIKE expressions.
+    Scores each chunk against: chunk text, document title, document category, source filename.
+    Returns up to 5 top-scoring chunks with score >= 2.0.
     """
     if not has_ingested_docs():
         return []
 
     import sqlite3
-    keywords = [w for w in query.lower().split() if len(w) > 2]
+
+    keywords = _tokenize(query)
     if not keywords:
         keywords = [query[:3]]
 
-    # Get all matching chunks with a relevance score
-    # Score = count of how many keywords appear in the chunk
-    like_parts = []
-    params: list[str] = []
-    for i, kw in enumerate(keywords):
-        like_parts.append(f"CASE WHEN LOWER(kc.content) LIKE ? THEN 1 ELSE 0 END AS score{i}")
-        params.append("%" + kw + "%")
-
-    query_sql = (
+    conn = sqlite3.connect(_KB_DB_PATH)
+    rows = conn.execute(
         "SELECT doc.document_id, doc.title, doc.category, doc.effective_date, "
-        f'{", ".join(like_parts)}, kc.chunk_index, kc.content FROM knowledge_chunks kc '
-        "JOIN knowledge_documents doc ON doc.document_id = kc.document_id "
-        "WHERE (" + " OR ".join([f"LOWER(kc.content) LIKE ?" for kw in keywords]) + ")"
-    )
+        "doc.source_file, kc.chunk_index, kc.content "
+        "FROM knowledge_chunks kc "
+        "JOIN knowledge_documents doc ON doc.document_id = kc.document_id"
+    ).fetchall()
+    conn.close()
 
-    # Add category filter from triage ONLY as a soft hint, not hard filter
-    if category:
-        query_sql += f" AND doc.category LIKE '%{category}%'"
-
-    query_sql += " ORDER BY kc.chunk_index"
-
-    try:
-        conn = sqlite3.connect(_KB_DB_PATH)
-        result = conn.execute(query_sql, params).fetchall()
-        conn.close()
-    except Exception:
-        return []
-
-    # Score and rank by document: sum of keyword matches
-    docs_scored: dict[str, tuple[float, dict]] = {}
-    for row in result:
-        doc_id = row[0]
-        title = row[1]
-        cat_ = row[2]
-        eff_date = row[3]
-        # scores are columns 4 to 4+len(keywords)-1
-        score = sum(row[i] for i in range(4, 4 + len(keywords)))
-        content = row[-1]
-        chunk_idx = row[-2]
-
-        if doc_id not in docs_scored or score > docs_scored[doc_id][0]:
-            docs_scored[doc_id] = (score, {
-                "document_id": doc_id,
-                "title": title,
-                "category": cat_,
-                "effective_date": eff_date,
-                "chunk_index": chunk_idx,
-                "content": content,
-            })
-
-    # Return docs sorted by relevance score descending, then alphabetically by doc_id for stability
-    ranked = sorted(docs_scored.items(), key=lambda x: (-x[1][0], x[0]))
-    return [v[1] for v in ranked[:5]]
+    return _score_chunks(rows, keywords)
 
 
 def _get_db_conn():

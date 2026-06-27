@@ -152,7 +152,8 @@ def _generate_mock_response(action, category, kb_results, matched_keywords, ques
     # If ingested docs exist, search them FIRST and ONLY them for real answers.
     if has_ingested and db is not None:
         from app.services.knowledge_base import search_ingested
-        ingested_results = search_ingested(db, question_text, category=_enum_str(category))
+        # Category is ignored — search all chunks regardless of triage category
+        ingested_results = search_ingested(db, question_text)
         if ingested_results:
             top = ingested_results[0]
             effective = top.get('effective_date', 'N/A') or 'N/A'
