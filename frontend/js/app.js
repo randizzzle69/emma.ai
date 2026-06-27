@@ -244,6 +244,7 @@
         <div class="admin-tabs">
           <button class="admin-tab active" data-tab="audit">Audit Log</button>
           <button class="admin-tab" data-tab="kb">Knowledge Base</button>
+          <button class="admin-tab" data-tab="ingest">Ingestion</button>
         </div>
         <div id="admin-content"><div class="loading">Loading...</div></div>
       </div>`;
@@ -270,7 +271,87 @@
             entries.map(e => `<tr><td>${e.id}</td><td>${e.category}</td><td style="font-weight:500">${e.title}</td><td style="color:#64748b;font-size:0.85rem">${(e.tags||[]).join(', ')}</td></tr>`).join('') +
             '</tbody></table>';
         } catch(err) { content.innerHTML = '<div class="error-msg">' + err.message + '</div>'; }
+      } else if (tab === 'ingest') {
+        await renderIngestionPanel(content);
       }
+    }
+
+    // ── Ingestion status panel ─────────────────────────
+    async function renderIngestionPanel(container) {
+      let ingestBtn = container.querySelector('#ingest-btn');
+      if (ingestBtn) return; // already rendered
+
+      container.innerHTML = `
+        <div style="display:flex;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;">
+          <button id="ingest-btn" class="btn btn-primary">Run Ingestion</button>
+          <span id="ingest-status-text" style="color:#64748b;font-size:0.9rem;line-height:36px;">Loading...</span>
+        </div>
+        <div id="ingest-detail"></div>`;
+
+      ingestBtn = document.getElementById('ingest-btn');
+
+      try {
+        const data = await api.getIngestionStatus();
+        const statText = document.getElementById('ingest-status-text');
+        statText.textContent = `Ingested: ${data.documents_ingested || 0} documents · ${data.total_chunks || 0} chunks`;
+
+        if (data.documents && data.documents.length > 0) {
+          container.innerHTML += `
+            <h4 style="margin-top:1rem;">Documents</h4>
+            <table class="question-table">
+              <thead><tr><th>Doc ID</th><th>Title</th><th>Category</th><th>Version</th><th>Owner</th><th>Authority</th></tr></thead>
+              <tbody>${data.documents.map(d => `<tr><td style="font-size:0.85rem">${d.document_id}</td><td style="font-weight:500">${d.title}</td><td>${d.category}</td><td>${d.version||'-'}</td><td>${d.owner||'-'}</td><td>${d.authority_level||'-'}</td></tr>`).join('')}</tbody>
+            </table>`;
+        }
+      } catch(err) {
+        const statusText = document.getElementById('ingest-status-text');
+        if (statusText) statusText.textContent = 'No ingestion data found.';
+        document.getElementById('ingest-detail').innerHTML = '<p style="color:#64748b;">Run the Ingestion button to load policy documents.</p>';
+      }
+
+      ingestBtn.addEventListener('click', async function() {
+        this.disabled = true;
+        this.textContent = 'Ingesting...';
+        try {
+          const data = await api.ingestDocuments();
+          const statText = document.getElementById('ingest-status-text');
+          if (statText) statText.textContent = `Done: ${data.documents_ingested} ingested · ${data.chunks_created} chunks`;
+
+          const detail = document.getElementById('ingest-detail');
+          let html = '<h4 style="margin-top:1rem;">Status Report</h4>';
+          html += '<ul style="color:#64748b;">';
+          html += `<li>Documents found: <strong>${data.documents_found}</strong></li>`;
+          html += `<li>Documents ingested: <strong>${data.documents_ingested}</strong></li>`;
+          html += `<li>Chunks created: <strong>${data.chunks_created}</strong></li>`;
+          if (data.errors && data.errors.length > 0) {
+            html += '<li style="color:#dc2626;">Errors: ';
+            data.errors.forEach(e => { html += '<div>' + e + '</div>'; });
+            html += '</li>';
+          } else {
+            html += '<li style="color:#16a34a;">No errors</li>';
+          }
+          html += '</ul>';
+
+          // Also reload doc list if we have the table element
+          const existingTable = container.querySelector('.question-table');
+          if (existingTable) {
+            const data2 = await api.getIngestionStatus();
+            const tbody = container.querySelector('.question-table tbody');
+            if (tbody && data2.documents && data2.documents.length > 0) {
+              tbody.innerHTML = data2.documents.map(d => `<tr><td style="font-size:0.85rem">${d.document_id}</td><td style="font-weight:500">${d.title}</td><td>${d.category}</td><td>${d.version||'-'}</td><td>${d.owner||'-'}</td><td>${d.authority_level||'-'}</td></tr>`).join('');
+            }
+          }
+
+          showToast('Ingestion complete: ' + data.documents_ingested + ' documents ingested.');
+        } catch(err) {
+          const statText = document.getElementById('ingest-status-text');
+          if (statText) statText.textContent = 'Ingestion failed.';
+          showToast('Ingestion failed: ' + err.message);
+        } finally {
+          this.disabled = false;
+          this.textContent = 'Run Ingestion';
+        }
+      });
     }
 
     document.querySelectorAll('.admin-tab').forEach(btn => {

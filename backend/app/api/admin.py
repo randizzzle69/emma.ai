@@ -1,15 +1,13 @@
-"""Admin API endpoints — audit log and knowledge base management."""
+"""Admin API endpoints — audit log, knowledge base, and document ingestion."""
 
 import json
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.db.database import get_db
 from app.schemas.audit import AuditLogEntry, AuditLogFilter
 from app.services.audit_log import get_audit_logs
 from app.services.knowledge_base import MOCK_KB
-
+from app.services.document_ingestion import ingest_documents_sync
 router = APIRouter()
 
 
@@ -63,3 +61,36 @@ async def add_knowledge_base_entry(
 ):
     """Admin-only: add a new KB entry (mock — no persistent store yet)."""
     return {"status": "pending", "message": "KB write-back coming in Phase 2. Entry logged for review."}
+
+
+@router.post("/ingest")
+async def ingest_documents_endpoint():
+    """Ingest policy documents listed in the manifest CSV.
+
+    Reads data/policies/manifest/policy_manifest.csv, extracts text from each PDF
+    via pdfplumber, chunks content, and stores metadata + chunks in SQLite.
+    Idempotent — re-runs clear existing ingested data before inserting.
+    """
+    try:
+        report = ingest_documents_sync()
+        return {
+            "status": "ok",
+            "documents_found": report.documents_found,
+            "documents_ingested": report.documents_ingested,
+            "chunks_created": report.chunks_created,
+            "errors": report.errors,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
+
+
+@router.get("/ingest-status")
+async def ingest_status_endpoint(db: AsyncSession = Depends(get_db)):
+    """Show current ingestion status and document metadata."""
+    from app.services.knowledge_base import get_ingestion_status
+    status = get_ingestion_status(db)
+    return {
+        "documents_ingested": status.get("documents_ingested", 0),
+        "total_chunks": status.get("total_chunks", 0),
+        "documents": status.get("documents", []),
+    }

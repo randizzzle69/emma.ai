@@ -32,3 +32,4 @@ def register_models():
     import app.models.question  # noqa: F401
     import app.models.feedback  # noqa: F401
     import app.models.audit_log  # noqa: F401
+    import app.models.knowledge_doc  # noqa: F401

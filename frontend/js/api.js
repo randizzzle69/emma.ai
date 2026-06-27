@@ -29,4 +29,6 @@ const api = {
     return apiReq('/admin/audit-log?' + qs);
   },
   getKnowledgeBase: () => apiReq('/admin/knowledge-base'),
+  ingestDocuments: () => apiReq('/admin/ingest', { method:'POST' }),
+  getIngestionStatus: () => apiReq('/admin/ingest-status'),
 };
