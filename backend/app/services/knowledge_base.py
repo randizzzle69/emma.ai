@@ -191,16 +191,43 @@ def _tokenize(text: str) -> list[str]:
 def _score_chunks(rows, keywords) -> list[dict]:
     """Score all fetched rows against keywords using word-boundary matching.
 
-    Scoring priority (highest weight first):
-      - Multi-word domain phrases: 3.5–5.0 points per match
-      - Single content match:     2.0 points
-      - Title match:              1.5 points
-      - Category match:           1.0 points
-      - Source file match:        1.0 points
+    Scoring strategy:
+      Pass 1 — Identify the most relevant document(s) by matching keywords
+               against document metadata (title, category, source_file).
+      Pass 2 — Score each chunk normally, then apply a +5.0 bonus for chunks
+               from any pass-1 winning document.
+    
+    This ensures a query like 'gift' correctly hits the Gift policy by its title,
+    not by accumulated domain-term noise across competing docs' chunks.
 
-    Minimum threshold = 3.5 to ensure multi-word domain phrases always beat
-    generic single-word matches (which max out at ~2.0).
+    Minimum threshold = 3.5 to prevent generic single-word matches alone.
     """
+    # ── Pass 1: Score each document by metadata match ─────────────
+    doc_scores: dict[str, float] = {}
+    for row in rows:
+        doc_id = row[0]
+        title = (row[1] or "").lower()
+        cat_ = (row[2] or "").lower()
+        source_file = (row[4] or "").lower()
+        if doc_id not in doc_scores:
+            # First time seeing this doc — compute metadata score
+            m_score = 0.0
+            for kw in keywords:
+                if _match_word(kw, row[1] or ""):
+                    m_score += 4.0    # title match is very strong
+                elif _match_word(kw, row[2] or ""):
+                    m_score += 3.0    # category match
+                elif _match_word(kw, row[4] or ""):
+                    m_score += 3.0    # source file match
+            doc_scores[doc_id] = m_score
+
+    # Winning docs get +5.0 per chunk
+    best_meta = max(doc_scores.values()) if doc_scores else 0.0
+    winning_docs: set[str] = set(
+        did for did, sc in doc_scores.items() if sc >= best_meta * 0.8 and sc > 0
+    )
+
+    # ── Pass 2: Score each chunk ───────────────────────────────────
     scored_chunks: list[tuple[float, dict]] = []
     for row in rows:
         doc_id = row[0]
@@ -213,13 +240,10 @@ def _score_chunks(rows, keywords) -> list[dict]:
 
         score = 0.0
         for phrase, base_score in _DOMAIN_PHRASES:
-            # Multi-word phrases match as exact substrings (lowercase)
-            if phrase.lower() in content.lower():
+            if phrase.lower() in (content or "").lower():
                 score += base_score
 
         for kw in keywords:
-            # If we already got domain-phrase points for this chunk,
-            # single-word keyword matches add smaller bonus.
             if _match_word(kw, content):
                 score += 2.0
             elif _match_word(kw, title):
@@ -228,6 +252,9 @@ def _score_chunks(rows, keywords) -> list[dict]:
                 score += 1.0
             elif _match_word(kw, source_file):
                 score += 1.0
+
+        if doc_id in winning_docs:
+            score += 5.0  # boost from pass-1 metadata match
 
         if score >= 3.5:
             scored_chunks.append((score, {
