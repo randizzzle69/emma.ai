@@ -1,0 +1,22 @@
+/* ALL styling via className only */
+.text-muted { color: #64748b; }
+.date-cell { color: #64748b; font-size: 13px; }
+.text-success { color: #16a34a; margin-top: 12px; }
+.bg-light-btn { background-color: #f1f5f9; border: none; cursor: pointer; padding: 6px 8px; border-radius: 8px; font-size: 14px; }
+.border-input { padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 8px; }
+.flex-wrap { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.mb-16 { margin-bottom: 16px; }
+.mt-12 { margin-top: 12px; }
+.mt-16 { margin-top: 16px; }
+.fs-sm { font-size: 14px; }
+.pd-sm { padding: 8px 12px; }
+.bold { font-weight: bold; }
+.grid-2col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.flex-row { display: flex; align-items: center; gap: 12px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+.pointer { cursor: pointer; }
+.text-center { text-align: center; }
+
+html { font-size: 16px; }
+body { margin: 0; background: #f8fafc; }
+#root { min-height: 100vh; }
