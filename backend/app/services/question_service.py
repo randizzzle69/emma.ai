@@ -132,8 +132,9 @@ async def list_questions(
 def _format_policy_answer(question_text: str, results: list[dict]) -> str:
     """Format retrieved policy chunks into a structured, plain-English HR answer.
 
-    Uses top result(s) from search. If the top result's title doesn't match
-    the question's likely topic at all (score <= 1.0), returns the canonical fallback.
+    Uses top result(s) from search. Before returning an answer, verifies that the
+    top chunk actually contains meaningful query-relevant terms (not just unrelated
+    domain phrase accumulation). If not, returns canonical fallback.
 
     Returns exactly these sections:
       1. Short Answer
@@ -142,7 +143,8 @@ def _format_policy_answer(question_text: str, results: list[dict]) -> str:
       4. Source Reference
       5. When to Contact HR or Compliance
     """
-    # Need at least one result with score >= 1.0 (i.e., meaningful keyword match)
+    from app.services.knowledge_base import _tokenize, _match_word, _PLURAL_NORMALIZATION
+
     if not results:
         return (
             "**Emma's Answer:**\n\n"
@@ -150,7 +152,45 @@ def _format_policy_answer(question_text: str, results: list[dict]) -> str:
             "Please contact HR directly at hr@company.com or call (555) 123-4567."
         )
 
+    # Content relevance gate: verify top chunk contains meaningful query terms
+    query_keywords = _tokenize(question_text)
     top = results[0]
+    top_content = (top.get('content', '') or '').lower()
+    has_relevant_match = False
+    for kw in query_keywords:
+        if _match_word(kw, top_content):
+            has_relevant_match = True
+            break
+        base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
+        if base_kw != kw and _match_word(base_kw, top_content):
+            has_relevant_match = True
+            break
+    
+    # Also check the second result as secondary relevance signal
+    if not has_relevant_match and len(results) > 1:
+        second_content = (results[1].get('content', '') or '').lower()
+        for kw in query_keywords:
+            if _match_word(kw, second_content):
+                # Use second result instead of top
+                results = [results[1]] + results[:1]
+                top = results[0]
+                top_content = (top.get('content', '') or '').lower()
+                has_relevant_match = True
+                break
+            base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
+            if base_kw != kw and _match_word(base_kw, second_content):
+                results = [results[1]] + results[:1]
+                top = results[0]
+                top_content = (top.get('content', '') or '').lower()
+                has_relevant_match = True
+                break
+    
+    if not has_relevant_match:
+        return (
+            "**Emma's Answer:**\n\n"
+            "I don't have enough information from our current policy documents to answer this accurately. "
+            "Please contact HR directly at hr@company.com or call (555) 123-4567."
+        )
     title = top.get('title', 'Unknown')
     effective_date = top.get('effective_date', '') or 'N/A'
     chunk_index = top.get('chunk_index', '?')

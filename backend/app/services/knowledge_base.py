@@ -158,34 +158,52 @@ _STOPWORDS = frozenset({
 
 # Multi-word domain terms that should match as phrases and earn high chunk scores.
 # These are the HR-specific terms customers actually search for — they beat generic words.
-_DOMAIN_PHRASES: list[tuple[str, float]] = [
-    # Multi-word domain phrases — high boost when they appear in chunk text
-    ("paid time off", 4.5),
-    ("time off", 4.0),
-    ("sick leave", 3.5),
-    ("annual leave", 3.5),
-    ("gift and hospitality", 4.0),
-    ("gift & hospitality", 4.0),
-    ("credit card", 3.5),
-    # Single-word HR-specific domain terms — boosted when they match chunk text
-    # so they can combine with other content matches to exceed the threshold.
-    ("pto", 3.0),
-    ("vacation", 2.5),
-    ("gift", 2.5),
-    ("hospitality", 2.5),
-    ("laptop", 2.5),
-    ("computer", 2.0),
+# Plural-to-singular normalization for common HR search terms.
+# Applied during tokenization so "gifts" → "gift", "vendors" → "vendor", etc.
+_PLURAL_NORMALIZATION: dict[str, str] = {
+    "gifts": "gift",
+    "accepting": "accept",
+    "accepted": "accept",
+    "vendors": "vendor",
+    "expenses": "expense",
+    "days": "day",
+    "schedules": "schedule",
+}
+
+_DOMAIN_PHRASES: list[tuple[str, float, frozenset[str]]] = [
+    # (phrase_text, base_score, set_of_query_terms_required_to_activate_this_phrase)
+    # Multi-word domain phrases — only boost when query signals this domain
+    ("paid time off", 4.5, frozenset({"pto", "time off", "vacation", "day"})),
+    ("time off", 3.0, frozenset({"time off", "pto", "day"})),
+    ("sick leave", 3.5, frozenset({"sick", "leave"})),
+    ("annual leave", 3.5, frozenset({"sick", "leave", "annual"})),
+    ("gift and hospitality", 4.0, frozenset({"gift", "hospitality", "vendor"})),
+    ("gift & hospitality", 4.0, frozenset({"gift", "hospitality", "vendor"})),
+    ("credit card", 3.5, frozenset({"credit", "card", "expense", "travel"})),
+    # Single-word HR-specific domain terms — only boost when query signals this domain
+    ("pto", 3.0, frozenset({"pto", "vacation", "day", "time off"})),
+    ("vacation", 2.5, frozenset({"pto", "vacation", "day", "time off"})),
+    ("gift", 2.5, frozenset({"gift", "hospitality", "vendor"})),
+    ("hospitality", 2.5, frozenset({"gift", "hospitality", "vendor"})),
+    ("laptop", 2.5, frozenset({"laptop", "device", "personal use", "equipment"})),
+    ("computer", 1.5, frozenset({"laptop", "computer", "device", "equipment"})),
 ]
 
 
 def _tokenize(text: str) -> list[str]:
-    """Lowercase, strip punctuation via regex word-boundary extraction, remove stopwords."""
+    """Lowercase, strip punctuation via regex word-boundary extraction,
+    remove stopwords, and normalize common plural/verb variants."""
     import string
     text = text.lower()
     translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
     text = text.translate(translator)
     tokens = [w for w in text.split() if len(w) > 1 and w not in _STOPWORDS]
-    return list(dict.fromkeys(tokens))  # preserve order, dedupe
+    # Normalize plurals/verbs to base form
+    normalized = []
+    for t in tokens:
+        base = _PLURAL_NORMALIZATION.get(t, t)
+        normalized.append(base)
+    return list(dict.fromkeys(normalized))  # preserve order, dedupe
 
 
 def _score_chunks(rows, keywords) -> list[dict]:
@@ -239,7 +257,10 @@ def _score_chunks(rows, keywords) -> list[dict]:
         content = row[6]
 
         score = 0.0
-        for phrase, base_score in _DOMAIN_PHRASES:
+        # Only apply domain phrase boosts when the query signals that domain
+        for phrase, base_score, required_terms in _DOMAIN_PHRASES:
+            if not required_terms.intersection(set(keywords)):
+                continue  # query doesn't signal this domain — skip entirely
             if phrase.lower() in (content or "").lower():
                 score += base_score
 
@@ -308,6 +329,25 @@ def search_ingested(db_session, query: str, category: str | None = None) -> list
     conn.close()
 
     return _score_chunks(rows, keywords)
+
+
+def _chunk_has_meaningful_query_match(chunk_content: str, query_keywords: list[str]) -> bool:
+    """Check if chunk content contains meaningful matches for the query.
+    
+    Returns True if at least one keyword appears in the content as a whole word,
+    or if an approved normalized variant matches. This prevents chunks from winning
+    solely due to unrelated domain phrase accumulation.
+    """
+    content_lower = (chunk_content or "").lower()
+    for kw in query_keywords:
+        # Direct keyword match in chunk content
+        if _match_word(kw, content_lower):
+            return True
+        # Check normalized form too
+        base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
+        if base_kw != kw and _match_word(base_kw, content_lower):
+            return True
+    return False
 
 
 def get_ingestion_status(db_session) -> dict:
