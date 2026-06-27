@@ -8,7 +8,8 @@
 
 | # | Task | Owner | Est. | Notes |
 |---|------|-------|------|-------|
-| 1.0 | ✅ Project scaffolding + planning docs | Sparky | Done | Completed 2026-06-26 |
+| 1.0 | ✅ Project scaffolding + planning docs | Sparky | Done | Completed 2026-06-26 | `5d21cca` |
+| 1.1 | ⏳ Backend project setup (FastAPI, dir structure, requirements.txt, Dockerfile) | Sparky | 2h | In progress — starting now |
 
 ---
 
@@ -16,7 +17,7 @@
 
 | # | Task | Owner | Est. | Notes |
 |---|------|-------|------|-------|
-| 1.1 | Set up backend (FastAPI project, folder structure, Dockerfile, requirements.txt) | TBD | 2h | `backend/` directory |
+| 1.2 | Design database schema (employees, questions, responses, feedback, audit_log) | TBD | 1h | SQLite migrations via Alembic or raw SQL |
 | 1.2 | Design database schema (employees, questions, responses, feedback, audit_log) | TBD | 1h | SQLite migrations via Alembic or raw SQL |
 | 1.3 | Implement HR knowledge base service (mock data layer + query API) | TBD | 3h | CRUD for policies, FAQ entries |
 | 1.4 | Implement question intake API endpoints | TBD | 2h | POST /api/questions, GET /api/questions/{id} |
@@ -54,9 +55,9 @@
 
 | # | Task | Date | Commit |
 |---|------|------|--------|
-| 1.0 | Project scaffolding + planning docs | 2026-06-26 | pending |
+| 1.0 | Project scaffolding + planning docs | 2026-06-26 | `5d21cca` |
 
 ---
 
-**Status:** Scaffolding complete. Ready to begin Phase 1 feature work.
+**Status:** Backend scaffolding in progress.
 **Last updated:** 2026-06-26

@@ -20,6 +20,8 @@
 | RESUME_MODE.md | Created |
 | ARCHITECTURE.md | Created |
 | .gitignore | Created |
+| ARCHITECTURE.md | Created |
+| .gitignore | Created |
 
 **Commands run:**
 ```bash
@@ -32,7 +34,7 @@ git commit -m "Initialize Emma.ai project scaffolding"
 
 **Test results:** None (scaffolding only)
 
-**Git commit:** _(to be filled after first commit)_
+**Git commit:** `5d21cca`
 
 **Next recommended step:** Begin Phase 1 feature work — start with `backend/` FastAPI setup (BACKLOG task 1.1).
 
