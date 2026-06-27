@@ -245,6 +245,7 @@
           <button class="admin-tab active" data-tab="audit">Audit Log</button>
           <button class="admin-tab" data-tab="kb">Knowledge Base</button>
           <button class="admin-tab" data-tab="ingest">Ingestion</button>
+          <button class="admin-tab" data-tab="feedback">Feedback Review</button>
         </div>
         <div id="admin-content"><div class="loading">Loading...</div></div>
       </div>`;
@@ -273,6 +274,21 @@
         } catch(err) { content.innerHTML = '<div class="error-msg">' + err.message + '</div>'; }
       } else if (tab === 'ingest') {
         await renderIngestionPanel(content);
+      } else if (tab === 'feedback') {
+        try {
+          const data = await api.getFeedback();
+          content.innerHTML = '<table class="question-table"><thead><tr><th>#</th><th>Q#</th><th>Rating</th><th>Question</th><th>Comment</th><th>Source Refs</th><th>Time</th></tr></thead><tbody>' +
+            data.entries.map(e => '<tr>' +
+              '<td>' + e.id + '</td>' +
+              '<td>' + e.question_id + '</td>' +
+              '<td>' + (e.rating_label === 'thumbs_up' ? '&#x1F44D;' : '&#x1F44E;') + '</td>' +
+              '<td style="max-width:200px;text-overflow:ellipsis;overflow:hidden">' + (e.question_text || '-') + '</td>' +
+              '<td style="color:#64748b">' + (e.comment ? e.comment.substring(0, 50) : '-') + '</td>' +
+              '<td style="color:#64748b;font-size:0.85rem">' + (e.source_references || '-') + '</td>' +
+              '<td style="color:#64748b;font-size:0.85rem">' + new Date(e.created_at).toLocaleString() + '</td>' +
+            '</tr>').join('') +
+            '</tbody></table>';
+        } catch(err) { content.innerHTML = '<div class="error-msg">' + err.message + '</div>'; }
       }
     }
 

@@ -31,4 +31,5 @@ const api = {
   getKnowledgeBase: () => apiReq('/admin/knowledge-base'),
   ingestDocuments: () => apiReq('/admin/ingest', { method:'POST' }),
   getIngestionStatus: () => apiReq('/admin/ingest-status'),
+  getFeedback: () => apiReq('/admin/feedback'),
 };

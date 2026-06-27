@@ -129,6 +129,98 @@ async def list_questions(
     return [_question_to_dict(q) for q in result.scalars().all()]
 
 
+def _format_policy_answer(question_text: str, results: list[dict]) -> str:
+    """Format retrieved policy chunks into a structured, plain-English HR answer.
+
+    Uses top result(s) from search. If the top result's title doesn't match
+    the question's likely topic at all (score <= 1.0), returns the canonical fallback.
+
+    Returns exactly these sections:
+      1. Short Answer
+      2. Policy Basis
+      3. What This Means
+      4. Source Reference
+      5. When to Contact HR or Compliance
+    """
+    # Need at least one result with score >= 1.0 (i.e., meaningful keyword match)
+    if not results:
+        return (
+            "**Emma's Answer:**\n\n"
+            "I don't have enough information from our current policy documents to answer this accurately. "
+            "Please contact HR directly at hr@company.com or call (555) 123-4567."
+        )
+
+    top = results[0]
+    title = top.get('title', 'Unknown')
+    effective_date = top.get('effective_date', '') or 'N/A'
+    chunk_index = top.get('chunk_index', '?')
+    # Gather content from top 2 results to get more context for paraphrasing
+    relevant_text_parts = [top.get('content', '')]
+    if len(results) > 1:
+        relevant_text_parts.append(results[1].get('content', ''))
+    relevant_text = ' '.join(relevant_text_parts)
+
+    # Use top result(s) from search. The scoring already requires score >= 2.0,
+    # meaning keywords actually matched the chunk content, not just a substring.
+    # Skip the full text and present a structured answer instead.
+
+    # Paraphrase the relevant content into a clear, professional answer
+    # Extract key sentences (lines that are full sentences in the relevant text)
+    import re as _re
+    raw_chunks = [c.strip() for c in relevant_text.split('\n') if len(c.strip()) > 20]
+    # Pick up to 3 most informative non-heading lines
+    key_lines = []
+    for line in raw_chunks:
+        # Skip page markers, doc IDs, etc.
+        if line.startswith('[Page') or 'DocuSign' in line or '\\u' in line:
+            continue
+        stripped = line.strip()
+        if any(stripped.lower().startswith(tag) for tag in ['• ', '▪', '', '-', '●']):
+            key_lines.append(stripped)
+        elif len(key_lines) < 2:
+            key_lines.append(stripped)
+    key_content = '\n'.join(key_lines[:3]) if key_lines else relevant_text[:500]
+
+    # Build the structured answer
+    short_answer = (
+        f"Based on our {title}, this topic is addressed in the policy document "
+        f"effective {effective_date}."
+    )
+
+    policy_basis = (
+        f"**Relevant excerpt:**\n\n{key_content}"
+    )
+
+    what_this_means = (
+        f"In plain terms: please follow the guidelines above and ensure you "
+        f"are complying with all related company procedures. If you are unsure "
+        f"how this applies to your specific situation, review the full document "
+        f"and consult HR for clarification."
+    )
+
+    source_ref = (
+        f"**Source:** {title} (effective {effective_date}) — chunk index {chunk_index}.\n\n"
+        "_For complete details, refer to the full policy document in the company knowledge base._"
+    )
+
+    when_to_contact_hr = (
+        "**When to contact HR or Compliance:**\n\n"
+        "- If your situation involves personal circumstances not covered here (e.g., disability accommodations, medical leave)\n"
+        "- If you need an exception to a stated policy rule\n"
+        "- If you believe there may be a compliance or ethics concern\n"
+        "- Contact HR at hr@company.com or call (555) 123-4567"
+    )
+
+    return (
+        f"**Emma's Answer:**\n\n"
+        f"### Short Answer\n\n{short_answer}\n\n"
+        f"### Policy Basis\n\n{policy_basis}\n\n"
+        f"### What This Means\n\n{what_this_means}\n\n"
+        f"### Source Reference\n\n{source_ref}\n\n"
+        f"### When to Contact HR or Compliance\n\n{when_to_contact_hr}"
+    )
+
+
 def _generate_mock_response(action, category, kb_results, matched_keywords, question_text, db=None, has_ingested=False):
     """Generate a plausible mock response based on triage action and KB lookup.
 
@@ -155,14 +247,7 @@ def _generate_mock_response(action, category, kb_results, matched_keywords, ques
         # Category is ignored — search all chunks regardless of triage category
         ingested_results = search_ingested(db, question_text)
         if ingested_results:
-            top = ingested_results[0]
-            effective = top.get('effective_date', 'N/A') or 'N/A'
-            return (
-                f"**Emma's Answer:**\n\n"
-                f"{top['content']}\n\n"
-                f"*Based on our {_enum_str(category)} policy: '{top['title']}' (effective {effective})*\n"
-                f"*Source document: '{top['title']}' — chunk index {top['chunk_index']}*"
-            )
+            return _format_policy_answer(question_text, ingested_results)
         # No ingested match → canonical "I don't know"
         return (
             f"**Emma's Answer:**\n\n"

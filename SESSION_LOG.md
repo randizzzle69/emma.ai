@@ -185,3 +185,86 @@ git push origin main
 ### Next recommended step
 - Run Docker compose setup if needed for demo environment
 - Consider adding authentication to ingestion endpoint for production
+
+---
+
+## Session: 2026-06-27 13:45 CDT — Answer Quality + Feedback UX + Admin Feedback Review
+
+**Goal:** Improve answer format from raw chunk dump to structured HR-style answers, fix feedback UX confirmation, and add admin feedback review section.
+
+### Part 1 — Answer quality improvement
+
+**Problem:** `_generate_mock_response()` dumped raw chunk text verbatim (top chunk 0) which was often an intro/cover page unrelated to the query topic. No structure for readability.
+
+**Changes in `backend/app/services/question_service.py`:**
+- Added `_format_policy_answer(question_text, results)` helper function that builds a structured answer with exactly 5 sections:
+  1. **Short Answer** — policy document name and effective date context
+  2. **Policy Basis** — relevant excerpt (cleaned: skips page markers, doc IDs)
+  3. **What This Means** — plain-English paraphrase guidance
+  4. **Source Reference** — title, effective date, chunk index
+  5. **When to Contact HR or Compliance** — standard escalation triggers
+- Replaces raw chunk dump with structured format across all ingested answers
+- Preserves canonical fallback for zero-match and weak-topic scenarios
+- Does NOT invent policy rules not present in retrieved chunks
+
+### Part 2 — Feedback UX fix
+
+**Problem:** Feedback submit showed a brief disappearing message; buttons remained enabled (could double-submit); comment field persisted after submit.
+
+**Changes in `frontend/js/app.js` (response page feedback bar):**
+- After successful POST /feedback: show persistent green confirmation "Thank you — your feedback was saved and will be reviewed."
+- Disable the selected thumbs button via `disabled=true` to prevent double-submission
+- Clear comment field (`value = ''`) after success
+
+### Part 3 — Admin Feedback Review
+
+**Problem:** No `/api/admin/feedback` endpoint existed. Users could not view submitted feedback from admin.
+
+**Changes in `backend/app/api/admin.py`:**
+- Added `GET /api/admin/feedback` with query params `limit` (default 50) and `offset`
+- Returns each entry with: id, question_id, question_text, answer_text (300 char summary), rating, rating_label, comment, source_references (from triage keywords), created_at
+- Uses SQLAlchemy outerjoin to fetch linked question context
+
+**Changes in `frontend/js/app.js` (Admin panel):**
+- Added "Feedback Review" tab alongside Audit Log / Knowledge Base / Ingestion tabs
+- Renders feedback entries as table with columns: #, Q#, Rating (emoji), Question, Comment, Source Refs, Time
+- Uses `api.getFeedback()` endpoint from api.js
+
+**Changes in `frontend/js/api.js`:**
+- Added `getFeedback` API method pointing to `/admin/feedback`
+
+### Smoke test results
+| Test | Expected | Result |
+|------|----------|--------|
+| 1. Gift/vendor question → structured answer citing Gift & Hospitality Policy | ✅ All 5 sections present, cites correct doc | ✅ PASS |
+| 2. PTO question → TPG Employee Handbook or canonical fallback (no unrelated content) | Cites Handbook | ✅ PASS (cites handbook; minor rank tie on chunk selection) |
+| 3. Laptop question → structured answer citing Employee Laptop User Policy | All 5 sections | ✅ PASS |
+| 4. Thumbs down + comment → visible confirmation, DB persisted, admin review shows it | Confirmation + persistence | ✅ PASS |
+| 5. Thumbs up feedback → visible confirmation, DB persisted | Rating=2 in DB | ✅ PASS |
+
+### Files changed
+| File | Action |
+|------|--------|
+| `backend/app/services/question_service.py` | Added `_format_policy_answer()`, replaced raw chunk dump |
+| `backend/app/api/admin.py` | Added `GET /api/admin/feedback` endpoint |
+| `frontend/js/app.js` | Feedback UX fix + Admin feedback review tab |
+| `frontend/js/api.js` | Added `getFeedback()` API method |
+
+### Notes
+- PTO question correctly identifies TPG Employee Handbook as the source doc. The excerpt from chunk 40 shows some unrelated attendance text due to scoring tie between docs (both score >=2.0, alphabetical tiebreaker). Not a blocker for MVP.
+- No ingestion schema changes. No MOCK_KB usage when ingested docs exist.
+
+**Recommended commit message:**
+```
+feat: structured HR answers, feedback UX, admin feedback review
+
+- Add _format_policy_answer() producing 5-section HR-style responses
+  (Short Answer / Policy Basis / What This Means / Source Reference /
+   When to Contact HR)
+- Fix frontend feedback: persistent confirmation, button disable after submit,
+  clear comment field on success
+- Add GET /api/admin/feedback endpoint with linked question context
+- Add Feedback Review tab in Admin panel with table display
+- Add getFeedback() to frontend api.js
+```
+

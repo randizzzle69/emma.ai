@@ -94,3 +94,57 @@ async def ingest_status_endpoint(db: AsyncSession = Depends(get_db)):
         "total_chunks": status.get("total_chunks", 0),
         "documents": status.get("documents", []),
     }
+
+
+@router.get("/feedback")
+async def get_feedback_endpoint(
+    limit: int = Query(50, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return recent feedback entries with linked question context.
+
+    Each entry includes:
+      - feedback id
+      - question id + text + response summary
+      - rating (1=thumbs down, 2=thumbs up)
+      - comment
+      - source references if available
+      - created timestamp
+    """
+    from sqlalchemy import select as _select
+    from app.models.feedback import Feedback
+    from app.models.question import Question
+
+    stmt = (
+        _select(Feedback, Question)
+        .outerjoin(Question, Feedback.question_id == Question.id)
+        .order_by(Feedback.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    entries = []
+    for fb, q in rows:
+        source_refs = ""
+        if q and q.triage_keywords:
+            try:
+                kws = json.loads(q.triage_keywords)
+                source_refs = f"Keywords: {', '.join(kws)}. " if kws else ""
+            except (json.JSONDecodeError, TypeError):
+                pass
+        entries.append({
+            "id": fb.id,
+            "question_id": q.id if q else fb.question_id,
+            "question_text": q.question_text if q else "",
+            "answer_text": q.response_text[:300] if q and q.response_text else "",
+            "rating": fb.rating,
+            "rating_label": "thumbs_up" if fb.rating == 2 else "thumbs_down",
+            "comment": fb.comment or "",
+            "source_references": source_refs,
+            "created_at": fb.created_at.isoformat() if fb.created_at else None,
+        })
+
+    return {"total": len(rows), "entries": entries}

@@ -35,6 +35,14 @@
 
 ---
 
+## Now (In Progress)
+
+| # | Task | Owner | Est. | Notes |
+|---|------|-------|------|-------|
+| — | — | — | — | Nothing currently blocked |
+
+---
+
 ## Blocked
 
 | # | Task | Blocker | Notes |

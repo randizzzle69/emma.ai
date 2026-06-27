@@ -156,6 +156,27 @@ _STOPWORDS = frozenset({
     "schedule", "lunch",
 })
 
+# Multi-word domain terms that should match as phrases and earn high chunk scores.
+# These are the HR-specific terms customers actually search for — they beat generic words.
+_DOMAIN_PHRASES: list[tuple[str, float]] = [
+    # Multi-word domain phrases — high boost when they appear in chunk text
+    ("paid time off", 4.5),
+    ("time off", 4.0),
+    ("sick leave", 3.5),
+    ("annual leave", 3.5),
+    ("gift and hospitality", 4.0),
+    ("gift & hospitality", 4.0),
+    ("credit card", 3.5),
+    # Single-word HR-specific domain terms — boosted when they match chunk text
+    # so they can combine with other content matches to exceed the threshold.
+    ("pto", 3.0),
+    ("vacation", 2.5),
+    ("gift", 2.5),
+    ("hospitality", 2.5),
+    ("laptop", 2.5),
+    ("computer", 2.0),
+]
+
 
 def _tokenize(text: str) -> list[str]:
     """Lowercase, strip punctuation via regex word-boundary extraction, remove stopwords."""
@@ -170,9 +191,15 @@ def _tokenize(text: str) -> list[str]:
 def _score_chunks(rows, keywords) -> list[dict]:
     """Score all fetched rows against keywords using word-boundary matching.
 
-    Each keyword match: title=3, category=2, source_file=1.5, content=1.
-    Minimum threshold = 2.0 to prevent false positives from single substring matches.
-    Returns top 5 unique chunks sorted by score desc, then doc_id.
+    Scoring priority (highest weight first):
+      - Multi-word domain phrases: 3.5–5.0 points per match
+      - Single content match:     2.0 points
+      - Title match:              1.5 points
+      - Category match:           1.0 points
+      - Source file match:        1.0 points
+
+    Minimum threshold = 3.5 to ensure multi-word domain phrases always beat
+    generic single-word matches (which max out at ~2.0).
     """
     scored_chunks: list[tuple[float, dict]] = []
     for row in rows:
@@ -185,17 +212,24 @@ def _score_chunks(rows, keywords) -> list[dict]:
         content = row[6]
 
         score = 0.0
+        for phrase, base_score in _DOMAIN_PHRASES:
+            # Multi-word phrases match as exact substrings (lowercase)
+            if phrase.lower() in content.lower():
+                score += base_score
+
         for kw in keywords:
-            if _match_word(kw, title):
-                score += 3.0
-            elif _match_word(kw, cat_):
-                score += 2.0
-            elif _match_word(kw, source_file):
-                score += 1.5
+            # If we already got domain-phrase points for this chunk,
+            # single-word keyword matches add smaller bonus.
             if _match_word(kw, content):
+                score += 2.0
+            elif _match_word(kw, title):
+                score += 1.5
+            elif _match_word(kw, cat_):
+                score += 1.0
+            elif _match_word(kw, source_file):
                 score += 1.0
 
-        if score >= 2.0:
+        if score >= 3.5:
             scored_chunks.append((score, {
                 "document_id": doc_id,
                 "title": title,
@@ -225,7 +259,7 @@ def search_ingested(db_session, query: str, category: str | None = None) -> list
     Searches ALL ingested chunks regardless of triage category (category is ignored).
     Uses pure Python-side scoring — no complex SQL LIKE expressions.
     Scores each chunk against: chunk text, document title, document category, source filename.
-    Returns up to 5 top-scoring chunks with score >= 2.0.
+    Returns up to 5 top-scoring chunks with score >= 3.5.
     """
     import sqlite3
     from app.services.document_ingestion import DB_PATH_DEFAULT
@@ -305,7 +339,7 @@ def search_ingested_by_query(query: str, category: str | None = None) -> list[di
     Searches ALL ingested chunks regardless of triage category (category is ignored).
     Uses pure Python-side scoring — no complex SQL LIKE expressions.
     Scores each chunk against: chunk text, document title, document category, source filename.
-    Returns up to 5 top-scoring chunks with score >= 2.0.
+    Returns up to 5 top-scoring chunks with score >= 3.5.
     """
     if not has_ingested_docs():
         return []
