@@ -79,3 +79,56 @@ git push origin main
 **Next recommended step:** Review GitHub repo at https://github.com/randizzzle69/emma.ai. Decide whether to proceed with vanilla JS frontend or swap back to React/Vite.
 
 
+
+---
+
+## Session: 2026-06-27 00:16 CDT — MVP Policy Q&A Smoke Test & Verification
+
+**Goal:** Inspect existing code, verify all MVP features work end-to-end (question answering with source refs + feedback capture), and confirm no gaps requiring new endpoints.
+
+**Findings — everything already built:**
+| Feature | Status | Where |
+|---|---|---|
+| Ask policy questions | ✅ `POST /api/questions` | questions.py → question_service.py → triage KB lookup |
+| Answer with source refs | ✅ Answers include KB title, content excerpt, matched tags | _generate_mock_response() in question_service.py |
+| Feedback capture (thumbs up/down + comment) | ✅ `POST /api/feedback` | feedback.py → Feedback model in SQLite |
+| List policy documents | ✅ `GET /api/admin/knowledge-base` | admin.py → MOCK_KB (8 entries, 5 categories) |
+| Audit log | ✅ `GET /api/admin/audit-log` | admin.py → audit_log model |
+| Triaging (classify + route) | ✅ Rule-based triage in triage.py | ANSWER / ESCALATE_HR / ESCALATE_MANAGER |
+
+**Smoke test results — all endpoints verified live against running server:**
+1. `GET /api/health` → {"status": "ok"} ✅
+2. `POST /api/questions` (PTO query) → status=answered, response includes PTO Policy content + source refs ✅
+3. `GET /api/questions/{id}` → full question object with answer ✅
+4. `POST /api/feedback` → persisted rating=2, comment="Very helpful!" in SQLite feedback table ✅
+5. `GET /api/admin/knowledge-base` → 8 KB entries across leave/payroll/benefits/policy/compliance ✅
+6. `POST /api/questions` (compliance query) → status=escalated, triage_action=escalate_hr ✅
+7. Python import check → all 12 modules imported cleanly, no errors ✅
+8. Node syntax check → both api.js and app.js pass `node --check` ✅
+
+**DB state after smoke test:** questions=6, feedback=4, audit_log=13 (test data added)
+
+**No gaps found — MVP is complete and demoable.** The existing codebase fully satisfies the MVP scope:
+- Submit HR question → triage classifies it → answer with source KB references (title, content, tags)
+- View response in frontend with thumbs up/down + comment feedback
+- Feedback persists to SQLite feedback table
+- Admin panel shows audit log and knowledge base documents
+- 8 realistic HR policy documents already seeded across all categories
+
+**Files inspected:**
+| File | Purpose |
+|------|---------|
+| `backend/app/main.py` | FastAPI app + router wiring |
+| `backend/app/api/questions.py` | Question CRUD endpoints |
+| `backend/app/api/feedback.py` | Feedback capture endpoint |
+| `backend/app/api/admin.py` | Audit log + KB listing endpoints |
+| `backend/app/services/knowledge_base.py` | Mock KB with 8 policy documents |
+| `backend/app/services/question_service.py` | Question lifecycle + mock response generation with source refs |
+| `backend/app/services/triage.py` | Rule-based keyword classifier |
+| `backend/app/db/database.py` | Async SQLAlchemy/SQLite setup |
+| `frontend/js/api.js` | API client (all endpoints used) |
+| `frontend/js/app.js` | SPA pages: Ask, Questions, Responses, Admin |
+| `frontend/index.html` | Entry page with nav + main container |
+| `backend/data/emma.db` | SQLite DB with questions/feedback/audit_log tables |
+
+**Next recommended step:** Decide whether to commit the test data (likely wipe it first) or clean DB and proceed to Phase 2 items (integration tests, docker-compose).

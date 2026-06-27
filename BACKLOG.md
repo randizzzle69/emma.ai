@@ -64,3 +64,6 @@
 
 **Status:** Phase 1 backend + frontend MVP complete. Ready for integration tests and Docker compose.
 **Last updated:** 2026-06-26
+
+**Status:** Phase 1 backend + frontend MVP verified and demoable. No new code needed — all required endpoints, KB docs, and frontend wiring already exist. Backend smoke-tested live (health, question POST/GET/list, feedback POST, audit log GET, KB list). All imports clean. Ready for next-phase work.
+**Last updated:** 2026-06-27
