@@ -156,6 +156,18 @@ _STOPWORDS = frozenset({
     "schedule", "lunch",
 })
 
+# Generic words that appear in almost every policy doc's chunk text.
+# Even if they match the question, they don't make a chunk relevant.
+# E.g. "personal" appears in credit card policy as "personal expense"
+# but is meaningless for a question about installing software on an iPhone.
+_GENERIC_MATCH_WORDS = frozenset({
+    "company", "policy",
+    "personal", "corporate",
+    "requirement", "required",
+    "responsible",
+    "ensure",
+})
+
 # Multi-word domain terms that should match as phrases and earn high chunk scores.
 # These are the HR-specific terms customers actually search for — they beat generic words.
 # Plural-to-singular normalization for common HR search terms.
@@ -190,6 +202,167 @@ _DOMAIN_PHRASES: list[tuple[str, float, frozenset[str]]] = [
 ]
 
 
+# ── Intent inference and relevance gating ──────────────────────────────
+
+
+class _Intent:
+    DEVICE_SOFTWARE = "device_software"
+    GIFT_HOSPITALITY = "gift_hospitality"
+    CORPORATE_CARD = "corporate_card_expense"
+    PTO_LEAVE = "pto_leave"
+    UNKNOWN = "unknown"
+
+
+# Intent → query terms that trigger it (normalized lowercase)
+_INTENT_TRIGGERS: dict[str, frozenset[str]] = {
+    _Intent.DEVICE_SOFTWARE: frozenset({
+        "laptop", "phone", "iphone", "mobile", "device", "software",
+        "install", "pc", "tablet", "personal use", "company device",
+        "corporate device",
+    }),
+    _Intent.GIFT_HOSPITALITY: frozenset({
+        "gift", "gifts", "vendor", "vendors", "hospitality", "accept",
+        "accepted", "approval", "disclosure",
+    }),
+    _Intent.CORPORATE_CARD: frozenset({
+        "credit card", "corporate card", "expense", "travel", "receipt",
+        "reimbursement", "authorized use", "tpg credit card",
+    }),
+    _Intent.PTO_LEAVE: frozenset({
+        "pto", "paid time off", "sick leave", "annual leave", "vacation",
+        "time off", "days off", "accrual", "sick days",
+    }),
+}
+
+# Intent → allowed document title / category signals
+_INTENT_ALLOWED_SOURCES: dict[str, list[str]] = {
+    _Intent.DEVICE_SOFTWARE: [
+        "employee laptop user policy",
+    ],
+    _Intent.GIFT_HOSPITALITY: [
+        "gift & hospitality policy",
+        "gift and hospitality policy",
+    ],
+    _Intent.CORPORATE_CARD: [
+        "tpg corporate credit card policy",
+        "tpg credit card expense & procurement policy",
+        "corporate credit card",
+    ],
+    _Intent.PTO_LEAVE: [
+        "texas petroleum group",  # TPG Employee Handbook covers PTO
+        "pg employee handbook",
+        "sick leave policy",
+        "pto policy",
+    ],
+}
+
+# Intent → meaningful chunk content terms (not just doc title)
+_INTENT_CHUNK_TERMS: dict[str, frozenset[str]] = {
+    _Intent.DEVICE_SOFTWARE: frozenset({
+        "laptop", "phone", "iphone", "mobile", "device", "software",
+        "install", "pc", "tablet", "equipment", "personal use",
+        "company property", "corporate property", "issued", "provided",
+    }),
+    _Intent.GIFT_HOSPITALITY: frozenset({
+        "gift", "gifts", "vendor", "vendors", "hospitality", "accept",
+        "disclose", "approval", "bribe", "kickback", "per diem",
+        "entertainment", "meals", "lodging",
+    }),
+    _Intent.CORPORATE_CARD: frozenset({
+        "credit card", "corporate card", "ccc", "expense", "travel",
+        "receipt", "reimbursement", "cardholder", "procurement",
+    }),
+    _Intent.PTO_LEAVE: frozenset({
+        "pto", "paid time off", "sick leave", "annual leave", "vacation",
+        "time away from work", "days of pto", "accrue", "accrual",
+        "leave entitlement", "bereavement leave", "jury duty",
+    }),
+}
+
+
+def _infer_intent(query: str) -> str:
+    """Infer the intent of a user's question from query keywords.
+
+    Returns one of the _Intent constants. Falls back to UNKNOWN if no
+    domain-specific terms are detected.
+    """
+    tokens = _tokenize(query)
+    # Also check for multi-word phrases in the original query
+    query_lower = query.lower()
+
+    best_intent: str | None = None
+    best_score = 0
+
+    for intent, triggers in _INTENT_TRIGGERS.items():
+        score = 0
+        for trigger in triggers:
+            if len(trigger) > 3:  # multi-word term check via substring
+                if trigger in query_lower:
+                    score += 3.0
+            else:  # single-word check via keyword matching
+                for t in tokens:
+                    if t == trigger or _PLURAL_NORMALIZATION.get(t, t) == trigger:
+                        score += 1.0
+                        break
+
+        if score > best_score:
+            best_score = score
+            best_intent = intent
+
+    return best_intent or _Intent.UNKNOWN
+
+
+def _is_chunk_relevant_to_intent(
+    doc_title_lower: str,
+    chunk_content_lower: str,
+    intent: str,
+) -> bool:
+    """Check if a retrieved chunk is relevant to the inferred intent.
+
+    Both document-level AND content-level checks must pass.
+    Returns True only if the chunk is clearly relevant.
+    """
+    allowed_sources = _INTENT_ALLOWED_SOURCES.get(intent, [])
+    chunk_terms = _INTENT_CHUNK_TERMS.get(intent, frozenset())
+
+    # For unknown intent: require very strong match (multiple domain terms in content)
+    if intent == _Intent.UNKNOWN:
+        matches = 0
+        for term in chunk_terms:
+            if term in chunk_content_lower:
+                matches += 1
+        return matches >= 3
+
+    # Check document-level relevance: doc title must be in allowed sources
+    doc_matches_any = False
+    for allowed in allowed_sources:
+        if allowed in doc_title_lower:
+            doc_matches_any = True
+            break
+
+    if not doc_matches_any:
+        # Document doesn't match intent — this chunk is irrelevant
+        return False
+
+    # Check content-level relevance: must have at least one intent-specific term
+    if not chunk_terms.intersection(set(chunk_content_lower.split())):
+        # Try substring matching for multi-word terms
+        has_term = False
+        for term in chunk_terms:
+            if len(term) > 3 and term in chunk_content_lower:
+                has_term = True
+                break
+            elif _match_word(term, chunk_content_lower):
+                has_term = True
+                break
+        if not has_term:
+            return False
+
+    return True
+
+
+
+
 def _tokenize(text: str) -> list[str]:
     """Lowercase, strip punctuation via regex word-boundary extraction,
     remove stopwords, and normalize common plural/verb variants."""
@@ -198,12 +371,11 @@ def _tokenize(text: str) -> list[str]:
     translator = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
     text = text.translate(translator)
     tokens = [w for w in text.split() if len(w) > 1 and w not in _STOPWORDS]
-    # Normalize plurals/verbs to base form
     normalized = []
     for t in tokens:
         base = _PLURAL_NORMALIZATION.get(t, t)
         normalized.append(base)
-    return list(dict.fromkeys(normalized))  # preserve order, dedupe
+    return list(dict.fromkeys(normalized))
 
 
 def _score_chunks(rows, keywords) -> list[dict]:
@@ -214,13 +386,12 @@ def _score_chunks(rows, keywords) -> list[dict]:
                against document metadata (title, category, source_file).
       Pass 2 — Score each chunk normally, then apply a +5.0 bonus for chunks
                from any pass-1 winning document.
-    
+
     This ensures a query like 'gift' correctly hits the Gift policy by its title,
     not by accumulated domain-term noise across competing docs' chunks.
 
     Minimum threshold = 3.5 to prevent generic single-word matches alone.
     """
-    # ── Pass 1: Score each document by metadata match ─────────────
     doc_scores: dict[str, float] = {}
     for row in rows:
         doc_id = row[0]
@@ -228,24 +399,21 @@ def _score_chunks(rows, keywords) -> list[dict]:
         cat_ = (row[2] or "").lower()
         source_file = (row[4] or "").lower()
         if doc_id not in doc_scores:
-            # First time seeing this doc — compute metadata score
             m_score = 0.0
             for kw in keywords:
                 if _match_word(kw, row[1] or ""):
-                    m_score += 4.0    # title match is very strong
+                    m_score += 4.0
                 elif _match_word(kw, row[2] or ""):
-                    m_score += 3.0    # category match
+                    m_score += 3.0
                 elif _match_word(kw, row[4] or ""):
-                    m_score += 3.0    # source file match
+                    m_score += 3.0
             doc_scores[doc_id] = m_score
 
-    # Winning docs get +5.0 per chunk
     best_meta = max(doc_scores.values()) if doc_scores else 0.0
     winning_docs: set[str] = set(
         did for did, sc in doc_scores.items() if sc >= best_meta * 0.8 and sc > 0
     )
 
-    # ── Pass 2: Score each chunk ───────────────────────────────────
     scored_chunks: list[tuple[float, dict]] = []
     for row in rows:
         doc_id = row[0]
@@ -257,10 +425,9 @@ def _score_chunks(rows, keywords) -> list[dict]:
         content = row[6]
 
         score = 0.0
-        # Only apply domain phrase boosts when the query signals that domain
         for phrase, base_score, required_terms in _DOMAIN_PHRASES:
             if not required_terms.intersection(set(keywords)):
-                continue  # query doesn't signal this domain — skip entirely
+                continue
             if phrase.lower() in (content or "").lower():
                 score += base_score
 
@@ -275,7 +442,7 @@ def _score_chunks(rows, keywords) -> list[dict]:
                 score += 1.0
 
         if doc_id in winning_docs:
-            score += 5.0  # boost from pass-1 metadata match
+            score += 5.0
 
         if score >= 3.5:
             scored_chunks.append((score, {
@@ -302,13 +469,7 @@ def _score_chunks(rows, keywords) -> list[dict]:
 
 
 def search_ingested(db_session, query: str, category: str | None = None) -> list[dict]:
-    """Search ingested policy chunks for relevance to the query.
-
-    Searches ALL ingested chunks regardless of triage category (category is ignored).
-    Uses pure Python-side scoring — no complex SQL LIKE expressions.
-    Scores each chunk against: chunk text, document title, document category, source filename.
-    Returns up to 5 top-scoring chunks with score >= 3.5.
-    """
+    """Search ingested policy chunks for relevance to the query."""
     import sqlite3
     from app.services.document_ingestion import DB_PATH_DEFAULT
 
@@ -331,25 +492,6 @@ def search_ingested(db_session, query: str, category: str | None = None) -> list
     return _score_chunks(rows, keywords)
 
 
-def _chunk_has_meaningful_query_match(chunk_content: str, query_keywords: list[str]) -> bool:
-    """Check if chunk content contains meaningful matches for the query.
-    
-    Returns True if at least one keyword appears in the content as a whole word,
-    or if an approved normalized variant matches. This prevents chunks from winning
-    solely due to unrelated domain phrase accumulation.
-    """
-    content_lower = (chunk_content or "").lower()
-    for kw in query_keywords:
-        # Direct keyword match in chunk content
-        if _match_word(kw, content_lower):
-            return True
-        # Check normalized form too
-        base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
-        if base_kw != kw and _match_word(base_kw, content_lower):
-            return True
-    return False
-
-
 def get_ingestion_status(db_session) -> dict:
     """Return ingestion status for the admin UI."""
     import sqlite3
@@ -367,14 +509,9 @@ def get_ingestion_status(db_session) -> dict:
             "total_chunks": chunks_total,
             "documents": [
                 {
-                    "document_id": d[0],
-                    "title": d[1],
-                    "category": d[2],
-                    "effective_date": d[3],
-                    "version": d[4],
-                    "owner": d[5],
-                    "authority_level": d[6],
-                    "page_count": d[7],
+                    "document_id": d[0], "title": d[1], "category": d[2],
+                    "effective_date": d[3], "version": d[4], "owner": d[5],
+                    "authority_level": d[6], "page_count": d[7],
                 }
                 for d in docs
             ],
@@ -383,16 +520,11 @@ def get_ingestion_status(db_session) -> dict:
         return {"documents_ingested": 0, "total_chunks": 0, "documents": [], "error": "No ingestion data found"}
 
 
-# ── Direct helper for question_service (no session dependency) ────────────────
-
-from app.services.document_ingestion import DB_PATH_DEFAULT as _KB_DB_PATH
-
-
 def has_ingested_docs() -> bool:
     """Check if any policy documents exist in the DB. No session needed."""
     import sqlite3
     try:
-        conn = sqlite3.connect(_KB_DB_PATH)
+        conn = sqlite3.connect(DB_PATH_DEFAULT)
         cnt = conn.execute("SELECT COUNT(*) FROM knowledge_documents").fetchone()[0]
         conn.close()
         return cnt > 0
@@ -401,23 +533,16 @@ def has_ingested_docs() -> bool:
 
 
 def search_ingested_by_query(query: str, category: str | None = None) -> list[dict]:
-    """Search ingested policy chunks by query. No session needed.
-
-    Searches ALL ingested chunks regardless of triage category (category is ignored).
-    Uses pure Python-side scoring — no complex SQL LIKE expressions.
-    Scores each chunk against: chunk text, document title, document category, source filename.
-    Returns up to 5 top-scoring chunks with score >= 3.5.
-    """
+    """Search ingested policy chunks by query. No session needed."""
     if not has_ingested_docs():
         return []
 
     import sqlite3
-
     keywords = _tokenize(query)
     if not keywords:
         keywords = [query[:3]]
 
-    conn = sqlite3.connect(_KB_DB_PATH)
+    conn = sqlite3.connect(DB_PATH_DEFAULT)
     rows = conn.execute(
         "SELECT doc.document_id, doc.title, doc.category, doc.effective_date, "
         "doc.source_file, kc.chunk_index, kc.content "

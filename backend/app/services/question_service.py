@@ -143,7 +143,8 @@ def _format_policy_answer(question_text: str, results: list[dict]) -> str:
       4. Source Reference
       5. When to Contact HR or Compliance
     """
-    from app.services.knowledge_base import _tokenize, _match_word, _PLURAL_NORMALIZATION
+    from app.services.knowledge_base import (_tokenize, _match_word, _PLURAL_NORMALIZATION, _GENERIC_MATCH_WORDS,
+                                       _infer_intent, _is_chunk_relevant_to_intent, _Intent)
 
     if not results:
         return (
@@ -152,33 +153,61 @@ def _format_policy_answer(question_text: str, results: list[dict]) -> str:
             "Please contact HR directly at hr@company.com or call (555) 123-4567."
         )
 
-    # Content relevance gate: verify top chunk contains meaningful query terms
-    query_keywords = _tokenize(question_text)
+    # ── Intent inference and relevance gate ──────────────────────
+    query_intent = _infer_intent(question_text)
+    
+    # Check top chunk against intent
+    top_title_lower = (results[0].get('title', '') or '').lower()
+    top_content_lower = (results[0].get('content', '') or '').lower()
+    gate_ok = _is_chunk_relevant_to_intent(top_title_lower, top_content_lower, query_intent)
+    
+    # If top chunk doesn't pass relevance, check second result
+    if not gate_ok and len(results) > 1:
+        second_title_lower = (results[1].get('title', '') or '').lower()
+        second_content_lower = (results[1].get('content', '') or '').lower()
+        if _is_chunk_relevant_to_intent(second_title_lower, second_content_lower, query_intent):
+            # Promote second result to top
+            results = [results[1]] + results[:1]
+            top_title_lower = second_title_lower
+            top_content_lower = second_content_lower
+            gate_ok = True
+    
+    if not gate_ok:
+        return (
+            "**Emma's Answer:**\n\n"
+            "I don't have enough information from our current policy documents to answer this accurately. "
+            "Please contact HR directly at hr@company.com or call (555) 123-4567."
+        )
+
+    # Content relevance gate: verify top chunk contains meaningful query terms.
+    # Must have at least one non-generic keyword match — generic words like
+    # "personal", "corporate" appear everywhere in policy text and are meaningless.
     top = results[0]
     top_content = (top.get('content', '') or '').lower()
+    query_keywords = _tokenize(question_text)
     has_relevant_match = False
     for kw in query_keywords:
-        if _match_word(kw, top_content):
-            has_relevant_match = True
-            break
+        # Skip generic words that appear in every doc
+        if kw in _GENERIC_MATCH_WORDS or (kw.lower() in _GENERIC_MATCH_WORDS):
+            continue
         base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
-        if base_kw != kw and _match_word(base_kw, top_content):
+        check_word = base_kw if base_kw != kw else kw
+        if _match_word(check_word, top_content):
             has_relevant_match = True
             break
     
     # Also check the second result as secondary relevance signal
     if not has_relevant_match and len(results) > 1:
+        top = results[0]
+        top_content = (top.get('content', '') or '').lower()
         second_content = (results[1].get('content', '') or '').lower()
         for kw in query_keywords:
-            if _match_word(kw, second_content):
-                # Use second result instead of top
-                results = [results[1]] + results[:1]
-                top = results[0]
-                top_content = (top.get('content', '') or '').lower()
-                has_relevant_match = True
-                break
+            if kw in _GENERIC_MATCH_WORDS or kw.lower() in _GENERIC_MATCH_WORDS:
+                continue
             base_kw = _PLURAL_NORMALIZATION.get(kw, kw)
-            if base_kw != kw and _match_word(base_kw, second_content):
+            check_word = base_kw if base_kw != kw else kw
+            if _match_word(check_word, second_content):
+                # Second result has a meaningful match — promote it
                 results = [results[1]] + results[:1]
                 top = results[0]
                 top_content = (top.get('content', '') or '').lower()
